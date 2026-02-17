@@ -1,0 +1,222 @@
+---
+title: "Redis"
+description: "Configure Broccoli with Redis as the message broker"
+---
+
+Redis is the default message broker for Broccoli. It provides fast, reliable message queuing with built-in persistence.
+
+## Installation
+
+Redis support is enabled by default:
+
+```toml
+[dependencies]
+broccoli_queue = "0.4"
+```
+
+Or explicitly:
+
+```toml
+[dependencies]
+broccoli_queue = { version = "0.4", features = ["redis"] }
+```
+
+## Connection
+
+Connect to Redis using a standard Redis URL:
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .build()
+    .await?;
+```
+
+### Connection URL format
+
+```
+redis://[username:password@]host[:port][/database]
+```
+
+Examples:
+
+```rust
+// Local Redis
+let queue = BroccoliQueue::builder("redis://localhost:6379").build().await?;
+
+// With authentication
+let queue = BroccoliQueue::builder("redis://:password@localhost:6379").build().await?;
+
+// With username and password (Redis 6+)
+let queue = BroccoliQueue::builder("redis://user:password@localhost:6379").build().await?;
+
+// Specific database
+let queue = BroccoliQueue::builder("redis://localhost:6379/1").build().await?;
+```
+
+### TLS connections
+
+Broccoli supports TLS connections to Redis using `rediss://`:
+
+```rust
+let queue = BroccoliQueue::builder("rediss://localhost:6379")
+    .build()
+    .await?;
+```
+
+## Connection pooling
+
+Configure the connection pool size:
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(10)  // Default is 10
+    .build()
+    .await?;
+```
+
+Higher pool sizes allow more concurrent operations but use more connections.
+
+## Configuration
+
+### Complete example
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, RetryStrategy};
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(10)
+    .failed_message_retry_strategy(
+        RetryStrategy::new()
+            .with_attempts(5)
+            .retry_failed(true)
+    )
+    .enable_scheduling(true)
+    .build()
+    .await?;
+```
+
+## Fair queue processing
+
+Redis supports fair queue processing through disambiguators. Enable fairness in consume options:
+
+```rust
+use broccoli_queue::queue::ConsumeOptions;
+
+let options = ConsumeOptions::builder()
+    .fairness(true)
+    .build();
+
+queue.process_messages("jobs", Some(4), Some(options), handler).await?;
+```
+
+When fairness is enabled, Broccoli ensures messages from different disambiguators are processed evenly rather than in strict FIFO order.
+
+### Publishing with disambiguators
+
+```rust
+// Messages grouped by customer
+queue.publish("jobs", Some("customer-a".to_string()), &job1, None).await?;
+queue.publish("jobs", Some("customer-a".to_string()), &job2, None).await?;
+queue.publish("jobs", Some("customer-b".to_string()), &job3, None).await?;
+```
+
+With fair processing, jobs from customer-a and customer-b will be interleaved rather than all customer-a jobs being processed first.
+
+## Redis data structures
+
+Broccoli uses the following Redis data structures:
+
+| Key pattern | Type | Purpose |
+|-------------|------|---------|
+| `{queue_name}` | List | Pending messages |
+| `{queue_name}:processing` | Sorted set | Messages being processed |
+| `{queue_name}:failed` | List | Failed messages |
+| `{queue_name}:scheduled` | Sorted set | Scheduled messages |
+| `{queue_name}:{disambiguator}` | List | Fair queue partitions |
+
+## Running Redis
+
+### Docker
+
+```bash
+docker run -d --name redis -p 6379:6379 redis:7
+```
+
+### Docker with persistence
+
+```bash
+docker run -d --name redis -p 6379:6379 \
+  -v redis-data:/data \
+  redis:7 redis-server --appendonly yes
+```
+
+### Docker Compose
+
+```yaml
+version: '3.8'
+services:
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+
+volumes:
+  redis-data:
+```
+
+## Best practices
+
+<Columns cols={2}>
+  <Card title="Enable persistence" icon="database">
+    Use AOF or RDB persistence to prevent message loss on restart.
+  </Card>
+  <Card title="Monitor memory" icon="memory">
+    Set `maxmemory` and a memory policy to prevent out-of-memory issues.
+  </Card>
+  <Card title="Use connection pooling" icon="layer-group">
+    Set an appropriate pool size for your workload.
+  </Card>
+  <Card title="Secure connections" icon="lock">
+    Use TLS and authentication in production.
+  </Card>
+</Columns>
+
+## Troubleshooting
+
+### Connection refused
+
+```
+Error: Broker error: Failed to connect to broker: Connection refused
+```
+
+Ensure Redis is running and accessible at the specified host and port.
+
+### Authentication failed
+
+```
+Error: Broker error: NOAUTH Authentication required
+```
+
+Include the password in your connection URL: `redis://:password@localhost:6379`
+
+### Connection timeout
+
+```
+Error: Connection timeout after 3 retries
+```
+
+Check network connectivity and firewall rules. Consider increasing the connection timeout or retry count.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="RabbitMQ" icon="rabbit" href="/brokers/rabbitmq">
+    Use RabbitMQ as an alternative broker
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first producer and consumer
+  </Card>
+</CardGroup>

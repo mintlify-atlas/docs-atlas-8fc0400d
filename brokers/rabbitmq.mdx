@@ -1,0 +1,248 @@
+---
+title: "RabbitMQ"
+description: "Configure Broccoli with RabbitMQ as the message broker"
+---
+
+RabbitMQ is a feature-rich message broker that provides advanced routing, clustering, and high availability.
+
+## Installation
+
+Enable RabbitMQ support in your `Cargo.toml`:
+
+```toml
+[dependencies]
+broccoli_queue = { version = "0.4", default-features = false, features = ["rabbitmq"] }
+```
+
+## Connection
+
+Connect to RabbitMQ using an AMQP URL:
+
+```rust
+let queue = BroccoliQueue::builder("amqp://localhost:5672")
+    .build()
+    .await?;
+```
+
+### Connection URL format
+
+```
+amqp://[username:password@]host[:port][/vhost]
+```
+
+Examples:
+
+```rust
+// Local RabbitMQ with defaults
+let queue = BroccoliQueue::builder("amqp://localhost:5672").build().await?;
+
+// With authentication
+let queue = BroccoliQueue::builder("amqp://guest:guest@localhost:5672").build().await?;
+
+// With virtual host
+let queue = BroccoliQueue::builder("amqp://guest:guest@localhost:5672/my_vhost").build().await?;
+
+// Production example
+let queue = BroccoliQueue::builder("amqp://user:password@rabbitmq.example.com:5672/production")
+    .build()
+    .await?;
+```
+
+## Connection pooling
+
+Configure the connection pool:
+
+```rust
+let queue = BroccoliQueue::builder("amqp://localhost:5672")
+    .pool_connections(10)
+    .build()
+    .await?;
+```
+
+## Configuration
+
+### Complete example
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, RetryStrategy};
+
+let queue = BroccoliQueue::builder("amqp://guest:guest@localhost:5672")
+    .pool_connections(10)
+    .failed_message_retry_strategy(
+        RetryStrategy::new()
+            .with_attempts(5)
+            .retry_failed(true)
+    )
+    .enable_scheduling(true)
+    .build()
+    .await?;
+```
+
+## Message scheduling
+
+Message scheduling with RabbitMQ requires the [delayed-exchange plugin](https://www.rabbitmq.com/blog/2015/04/16/scheduling-messages-with-rabbitmq).
+
+### Installing the plugin
+
+```bash
+rabbitmq-plugins enable rabbitmq_delayed_message_exchange
+```
+
+### Using scheduled messages
+
+```rust
+use broccoli_queue::queue::PublishOptions;
+use time::Duration;
+
+// Enable scheduling in the builder
+let queue = BroccoliQueue::builder("amqp://localhost:5672")
+    .enable_scheduling(true)
+    .build()
+    .await?;
+
+// Publish delayed message
+let options = PublishOptions::builder()
+    .delay(Duration::minutes(5))
+    .build();
+
+queue.publish("jobs", None, &job, Some(options)).await?;
+```
+
+<Note>
+Without the delayed-exchange plugin, attempting to use scheduling will result in an error. Install the plugin or disable scheduling if not needed.
+</Note>
+
+## Running RabbitMQ
+
+### Docker
+
+```bash
+docker run -d --name rabbitmq \
+  -p 5672:5672 \
+  -p 15672:15672 \
+  rabbitmq:3-management
+```
+
+The management UI is available at `http://localhost:15672` (guest/guest).
+
+### Docker with delayed-exchange plugin
+
+Create a `Dockerfile.rabbitmq`:
+
+```dockerfile
+FROM rabbitmq:3-management
+
+RUN apt-get update && apt-get install -y curl
+
+RUN curl -L https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/releases/download/v3.12.0/rabbitmq_delayed_message_exchange-3.12.0.ez \
+    -o /opt/rabbitmq/plugins/rabbitmq_delayed_message_exchange-3.12.0.ez
+
+RUN rabbitmq-plugins enable rabbitmq_delayed_message_exchange
+```
+
+Build and run:
+
+```bash
+docker build -f Dockerfile.rabbitmq -t rabbitmq-delayed .
+docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq-delayed
+```
+
+### Docker Compose
+
+```yaml
+version: '3.8'
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+volumes:
+  rabbitmq-data:
+```
+
+## RabbitMQ resources
+
+Broccoli creates the following RabbitMQ resources:
+
+| Resource | Type | Purpose |
+|----------|------|---------|
+| `{queue_name}` | Queue | Main message queue |
+| `{queue_name}.failed` | Queue | Failed messages |
+| `{queue_name}.delayed` | Exchange | Delayed message routing |
+
+## Message acknowledgment
+
+RabbitMQ messages are acknowledged when:
+
+- `acknowledge()` is called explicitly
+- The handler returns `Ok(())` (with default `handler_ack: true`)
+
+Messages are rejected (nacked) when:
+
+- `reject()` is called explicitly
+- The handler returns `Err(...)`
+
+## Best practices
+
+<Columns cols={2}>
+  <Card title="Use durable queues" icon="database">
+    Broccoli creates durable queues by default for persistence.
+  </Card>
+  <Card title="Set prefetch count" icon="list-ol">
+    Connection pooling helps manage concurrent message processing.
+  </Card>
+  <Card title="Monitor queues" icon="chart-line">
+    Use the management UI to monitor queue depths and throughput.
+  </Card>
+  <Card title="Handle dead letters" icon="skull">
+    Monitor the failed queue for messages that exhausted retries.
+  </Card>
+</Columns>
+
+## Troubleshooting
+
+### Connection refused
+
+```
+Error: Broker error: Failed to connect to broker: Connection refused
+```
+
+Ensure RabbitMQ is running:
+
+```bash
+docker ps | grep rabbitmq
+```
+
+### Authentication failed
+
+```
+Error: ACCESS_REFUSED - Login was refused
+```
+
+Verify credentials in your connection URL match the RabbitMQ user configuration.
+
+### Scheduling not working
+
+```
+Error: exchange 'delayed' not found
+```
+
+Install and enable the delayed-exchange plugin, or set `.enable_scheduling(false)`.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Redis" icon="database" href="/brokers/redis">
+    Use Redis as an alternative broker
+  </Card>
+  <Card title="SurrealDB" icon="database" href="/brokers/surrealdb">
+    Use SurrealDB as an alternative broker
+  </Card>
+</CardGroup>

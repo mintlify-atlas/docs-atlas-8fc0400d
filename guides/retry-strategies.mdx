@@ -1,0 +1,186 @@
+---
+title: "Retry strategies"
+description: "Handle failed messages with automatic retries"
+---
+
+Broccoli automatically retries failed messages according to a configurable strategy. This ensures transient failures don't cause permanent message loss.
+
+## Default retry behavior
+
+By default, Broccoli retries failed messages up to 3 times before moving them to the failed queue:
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(Default::default())
+    .build()
+    .await?;
+```
+
+## Configuring retry strategy
+
+Use `RetryStrategy` to customize retry behavior:
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, RetryStrategy};
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(
+        RetryStrategy::new()
+            .with_attempts(5)     // Retry up to 5 times
+            .retry_failed(true)   // Enable retries
+    )
+    .build()
+    .await?;
+```
+
+## Retry options
+
+### Set maximum attempts
+
+Control how many times a message is retried before being marked as failed:
+
+```rust
+let strategy = RetryStrategy::new()
+    .with_attempts(10);  // Retry up to 10 times
+```
+
+### Disable retries
+
+Disable automatic retries to immediately fail messages:
+
+```rust
+let strategy = RetryStrategy::new()
+    .retry_failed(false);  // No retries, fail immediately
+```
+
+## How retries work
+
+<Steps>
+  <Step title="Message fails">
+    When a message handler returns an error or panics, the message is rejected.
+  </Step>
+  <Step title="Attempt counter increments">
+    The message's `attempts` counter is incremented.
+  </Step>
+  <Step title="Retry or fail">
+    If attempts are below the maximum, the message is requeued for retry. Otherwise, it moves to the failed queue.
+  </Step>
+</Steps>
+
+## Accessing attempt count
+
+Check the current attempt count in your handler:
+
+```rust
+queue.process_messages(
+    "jobs",
+    Some(4),
+    None,
+    |message: BrokerMessage<JobPayload>| async move {
+        println!("Attempt {} for job {}", message.attempts, message.payload.id);
+        
+        if message.attempts > 2 {
+            // Take different action on later retries
+            println!("Multiple retries, trying alternative approach");
+        }
+        
+        process_job(&message.payload).await
+    },
+).await?;
+```
+
+## Returning errors
+
+Return a `BroccoliError` to trigger a retry:
+
+```rust
+use broccoli_queue::error::BroccoliError;
+
+queue.process_messages(
+    "jobs",
+    Some(4),
+    None,
+    |message: BrokerMessage<JobPayload>| async move {
+        match process_job(&message.payload).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // Return an error to trigger retry
+                Err(BroccoliError::Job(format!("Processing failed: {}", e)))
+            }
+        }
+    },
+).await?;
+```
+
+## Handling permanently failed messages
+
+Messages that exceed the retry limit are moved to a failed queue. You can process these separately:
+
+```rust
+// Process failed messages from the failed queue
+queue.process_messages(
+    "jobs_failed",  // Failed queue naming depends on broker implementation
+    Some(1),
+    None,
+    |message: BrokerMessage<JobPayload>| async move {
+        // Log to error tracking
+        log_failed_job(&message).await;
+        
+        // Notify operators
+        send_alert(&message).await;
+        
+        Ok(())
+    },
+).await?;
+```
+
+## Best practices
+
+<Columns cols={2}>
+  <Card title="Make handlers idempotent" icon="repeat">
+    Ensure your handlers can safely process the same message multiple times without side effects.
+  </Card>
+  <Card title="Log failures" icon="file-lines">
+    Log detailed information on each failure to aid debugging.
+  </Card>
+  <Card title="Use appropriate retry counts" icon="sliders">
+    Set retry counts based on the nature of expected failures. Transient errors may need more retries.
+  </Card>
+  <Card title="Monitor failed queues" icon="chart-line">
+    Set up monitoring and alerts for the failed message queue.
+  </Card>
+</Columns>
+
+## Example: exponential backoff
+
+While Broccoli doesn't have built-in exponential backoff, you can implement it in your handler:
+
+```rust
+use std::time::Duration;
+
+queue.process_messages(
+    "jobs",
+    Some(4),
+    None,
+    |message: BrokerMessage<JobPayload>| async move {
+        // Calculate backoff based on attempt count
+        if message.attempts > 0 {
+            let backoff = Duration::from_secs(2u64.pow(message.attempts as u32));
+            tokio::time::sleep(backoff).await;
+        }
+        
+        process_job(&message.payload).await
+    },
+).await?;
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Error handling" icon="triangle-exclamation" href="/api-reference/errors">
+    Understand Broccoli error types
+  </Card>
+  <Card title="Consumers" icon="download" href="/guides/consumers">
+    Configure consumer behavior
+  </Card>
+</CardGroup>

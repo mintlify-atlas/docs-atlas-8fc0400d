@@ -1,0 +1,212 @@
+---
+title: "BrokerMessage"
+description: "Message wrapper with metadata for queue operations"
+---
+
+`BrokerMessage<T>` wraps your message payload with metadata needed for queue operations like tracking, retries, and acknowledgment.
+
+## Definition
+
+```rust
+pub struct BrokerMessage<T: Clone> {
+    pub task_id: uuid::Uuid,
+    pub payload: T,
+    pub attempts: u8,
+    pub disambiguator: Option<String>,
+}
+```
+
+## Fields
+
+### `task_id`
+
+A unique identifier (UUID) assigned to each message when published.
+
+```rust
+println!("Message ID: {}", message.task_id);
+```
+
+**Type:** `uuid::Uuid`
+
+### `payload`
+
+Your message data. The type parameter `T` must implement `Clone`, `Serialize`, and `Deserialize`.
+
+```rust
+let job_data = &message.payload;
+println!("Job name: {}", job_data.task_name);
+```
+
+**Type:** `T`
+
+### `attempts`
+
+The number of processing attempts made for this message. Starts at 0 and increments on each retry.
+
+```rust
+if message.attempts > 2 {
+    println!("Message has been retried multiple times");
+}
+```
+
+**Type:** `u8`
+
+### `disambiguator`
+
+Optional grouping key for fair queue processing. Messages with the same disambiguator are processed in order relative to each other.
+
+```rust
+if let Some(group) = &message.disambiguator {
+    println!("Message belongs to group: {}", group);
+}
+```
+
+**Type:** `Option<String>`
+
+## Creating messages
+
+Messages are created automatically when publishing:
+
+```rust
+// The publish method creates a BrokerMessage internally
+let message = queue.publish("jobs", None, &job_payload, None).await?;
+
+// Access the assigned task_id
+println!("Created message: {}", message.task_id);
+```
+
+You can also create messages manually (rarely needed):
+
+```rust
+use broccoli_queue::brokers::broker::BrokerMessage;
+
+let message = BrokerMessage::new(
+    payload,                           // Your data
+    Some("group-1".to_string()),       // Optional disambiguator
+);
+```
+
+## Using in handlers
+
+Message handlers receive `BrokerMessage<T>` instances:
+
+```rust
+queue.process_messages(
+    "jobs",
+    Some(4),
+    None,
+    |message: BrokerMessage<JobPayload>| async move {
+        // Access metadata
+        println!("Task ID: {}", message.task_id);
+        println!("Attempt: {}", message.attempts);
+        
+        // Access your payload
+        let job = &message.payload;
+        process_job(job).await?;
+        
+        Ok(())
+    },
+).await?;
+```
+
+## Payload requirements
+
+Your payload type must implement:
+
+- `Clone` - For internal message handling
+- `Serialize` - For serializing to the broker
+- `Deserialize` - For deserializing from the broker
+
+```rust
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+    data: Vec<u8>,
+}
+```
+
+## Type inference
+
+Specify the payload type when consuming:
+
+```rust
+// Explicit type annotation
+let message: BrokerMessage<JobPayload> = queue.consume("jobs", None).await?;
+
+// Or with turbofish syntax
+let message = queue.consume::<JobPayload>("jobs", None).await?;
+
+// In handlers, specify in the closure parameter
+|message: BrokerMessage<JobPayload>| async move { ... }
+```
+
+## Examples
+
+### Tracking retries
+
+```rust
+|message: BrokerMessage<JobPayload>| async move {
+    if message.attempts == 0 {
+        println!("First attempt for {}", message.task_id);
+    } else {
+        println!("Retry {} for {}", message.attempts, message.task_id);
+    }
+    
+    process_job(&message.payload).await
+}
+```
+
+### Using disambiguators for tenant isolation
+
+```rust
+// Publishing with tenant isolation
+for tenant in tenants {
+    for job in tenant.jobs {
+        queue.publish(
+            "jobs",
+            Some(tenant.id.clone()),  // Disambiguator
+            &job,
+            None,
+        ).await?;
+    }
+}
+
+// Processing fairly across tenants
+let options = ConsumeOptions::builder()
+    .fairness(true)
+    .build();
+
+queue.process_messages("jobs", Some(4), Some(options), |msg| async move {
+    if let Some(tenant) = &msg.disambiguator {
+        println!("Processing job for tenant: {}", tenant);
+    }
+    Ok(())
+}).await?;
+```
+
+### Logging for debugging
+
+```rust
+|message: BrokerMessage<JobPayload>| async move {
+    log::info!(
+        "Processing message task_id={} attempt={} disambiguator={:?}",
+        message.task_id,
+        message.attempts,
+        message.disambiguator
+    );
+    
+    match process_job(&message.payload).await {
+        Ok(_) => {
+            log::info!("Completed task_id={}", message.task_id);
+            Ok(())
+        }
+        Err(e) => {
+            log::error!("Failed task_id={}: {:?}", message.task_id, e);
+            Err(e)
+        }
+    }
+}
+```

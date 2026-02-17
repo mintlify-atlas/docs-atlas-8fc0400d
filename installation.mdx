@@ -1,0 +1,122 @@
+---
+title: "Installation"
+description: "Add Broccoli to your Rust project"
+---
+
+## Requirements
+
+- Rust 1.70 or later
+- A supported message broker (Redis, RabbitMQ, or SurrealDB)
+
+## Add to Cargo.toml
+
+Add Broccoli to your project dependencies:
+
+```toml
+[dependencies]
+broccoli_queue = "0.4"
+```
+
+## Feature flags
+
+Broccoli uses feature flags to enable different broker backends. At least one broker feature must be enabled.
+
+### Redis (default)
+
+Redis is the default broker and is enabled automatically:
+
+```toml
+[dependencies]
+broccoli_queue = "0.4"
+```
+
+Or explicitly:
+
+```toml
+[dependencies]
+broccoli_queue = { version = "0.4", features = ["redis"] }
+```
+
+### RabbitMQ
+
+To use RabbitMQ as your message broker:
+
+```toml
+[dependencies]
+broccoli_queue = { version = "0.4", default-features = false, features = ["rabbitmq"] }
+```
+
+### SurrealDB
+
+To use SurrealDB as your message broker:
+
+```toml
+[dependencies]
+broccoli_queue = { version = "0.4", default-features = false, features = ["surrealdb"] }
+```
+
+### Multiple brokers
+
+You can enable multiple brokers if needed:
+
+```toml
+[dependencies]
+broccoli_queue = { version = "0.4", features = ["redis", "rabbitmq"] }
+```
+
+### Management API
+
+Enable the management feature for queue status monitoring:
+
+```toml
+[dependencies]
+broccoli_queue = { version = "0.4", features = ["redis", "management"] }
+```
+
+## Required dependencies
+
+Broccoli requires the following runtime dependencies:
+
+```toml
+[dependencies]
+broccoli_queue = "0.4"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+```
+
+## Verify installation
+
+Create a simple test to verify the installation:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .build()
+        .await?;
+    
+    println!("Connected to broker successfully!");
+    Ok(())
+}
+```
+
+Run your application:
+
+```bash
+cargo run
+```
+
+If you see "Connected to broker successfully!", your installation is working correctly.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Create your first producer and consumer
+  </Card>
+  <Card title="Broker guides" icon="server" href="/brokers/redis">
+    Configure your message broker
+  </Card>
+</CardGroup>

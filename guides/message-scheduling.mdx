@@ -1,0 +1,228 @@
+---
+title: "Message scheduling"
+description: "Delay and schedule messages for future processing"
+---
+
+Broccoli supports delayed and scheduled message processing, allowing you to publish messages that become available for consumption at a later time.
+
+## Enable scheduling
+
+First, enable scheduling when building the queue:
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .enable_scheduling(true)
+    .build()
+    .await?;
+```
+
+<Note>
+For RabbitMQ, message scheduling requires the [delayed-exchange plugin](https://www.rabbitmq.com/blog/2015/04/16/scheduling-messages-with-rabbitmq) to be installed on your broker.
+</Note>
+
+## Delayed messages
+
+Delay a message by a specified duration:
+
+```rust
+use broccoli_queue::queue::PublishOptions;
+use time::Duration;
+
+let options = PublishOptions::builder()
+    .delay(Duration::seconds(30))
+    .build();
+
+// This message will be available for processing in 30 seconds
+queue.publish("jobs", None, &job, Some(options)).await?;
+```
+
+### Common delay patterns
+
+```rust
+use time::Duration;
+
+// Delay by seconds
+let options = PublishOptions::builder()
+    .delay(Duration::seconds(10))
+    .build();
+
+// Delay by minutes
+let options = PublishOptions::builder()
+    .delay(Duration::minutes(5))
+    .build();
+
+// Delay by hours
+let options = PublishOptions::builder()
+    .delay(Duration::hours(1))
+    .build();
+```
+
+## Scheduled messages
+
+Schedule a message for a specific time using `schedule_at`:
+
+```rust
+use broccoli_queue::queue::PublishOptions;
+use time::OffsetDateTime;
+
+// Process tomorrow at noon
+let scheduled_time = OffsetDateTime::now_utc() + time::Duration::days(1);
+
+let options = PublishOptions::builder()
+    .schedule_at(scheduled_time)
+    .build();
+
+queue.publish("jobs", None, &job, Some(options)).await?;
+```
+
+### Scheduling examples
+
+```rust
+use time::{OffsetDateTime, Duration};
+
+// Schedule for 2 hours from now
+let in_two_hours = OffsetDateTime::now_utc() + Duration::hours(2);
+
+// Schedule for midnight UTC
+let now = OffsetDateTime::now_utc();
+let midnight = now.replace_time(time::Time::MIDNIGHT) + Duration::days(1);
+
+// Schedule for next Monday
+let days_until_monday = (8 - now.weekday().number_from_monday()) % 7;
+let next_monday = now + Duration::days(days_until_monday as i64);
+```
+
+## Batch scheduling
+
+Schedule multiple messages with the same delay:
+
+```rust
+let jobs = vec![
+    JobPayload { id: "job-1".to_string(), task_name: "task_a".to_string() },
+    JobPayload { id: "job-2".to_string(), task_name: "task_b".to_string() },
+];
+
+let options = PublishOptions::builder()
+    .delay(Duration::minutes(10))
+    .build();
+
+queue.publish_batch("jobs", None, jobs, Some(options)).await?;
+```
+
+## Combining with other options
+
+Scheduling can be combined with other publish options:
+
+```rust
+let options = PublishOptions::builder()
+    .delay(Duration::minutes(30))
+    .priority(1)                    // High priority when it becomes available
+    .ttl(Duration::hours(24))       // Expire if not processed within 24 hours
+    .build();
+
+queue.publish("jobs", None, &job, Some(options)).await?;
+```
+
+## Use cases
+
+### Retry with backoff
+
+Implement exponential backoff by scheduling retries:
+
+```rust
+queue.process_messages(
+    "jobs",
+    Some(4),
+    None,
+    |message: BrokerMessage<JobPayload>| async move {
+        match process_job(&message.payload).await {
+            Ok(_) => Ok(()),
+            Err(e) if message.attempts < 5 => {
+                // Schedule retry with exponential backoff
+                let delay = Duration::seconds(2i64.pow(message.attempts as u32));
+                let options = PublishOptions::builder()
+                    .delay(delay)
+                    .build();
+                
+                // Republish for later retry
+                queue.publish("jobs", None, &message.payload, Some(options)).await?;
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    },
+).await?;
+```
+
+### Scheduled reports
+
+Generate daily reports:
+
+```rust
+use time::{OffsetDateTime, Duration, Time};
+
+async fn schedule_daily_report(queue: &BroccoliQueue) -> Result<(), BroccoliError> {
+    let now = OffsetDateTime::now_utc();
+    let tomorrow_6am = (now + Duration::days(1))
+        .replace_time(Time::from_hms(6, 0, 0).unwrap());
+    
+    let job = ReportJob {
+        report_type: "daily_summary".to_string(),
+        date: tomorrow_6am.date(),
+    };
+    
+    let options = PublishOptions::builder()
+        .schedule_at(tomorrow_6am)
+        .build();
+    
+    queue.publish("reports", None, &job, Some(options)).await?;
+    Ok(())
+}
+```
+
+### Rate limiting
+
+Space out API calls to respect rate limits:
+
+```rust
+let api_calls: Vec<ApiCallJob> = get_pending_api_calls();
+
+for (i, call) in api_calls.into_iter().enumerate() {
+    let delay = Duration::seconds(i as i64);  // 1 call per second
+    
+    let options = PublishOptions::builder()
+        .delay(delay)
+        .build();
+    
+    queue.publish("api_calls", None, &call, Some(options)).await?;
+}
+```
+
+## Canceling scheduled messages
+
+Cancel a scheduled message before it becomes available:
+
+```rust
+let message = queue.publish("jobs", None, &job, Some(delayed_options)).await?;
+
+// Later, if you need to cancel:
+queue.cancel("jobs", message.task_id.to_string()).await?;
+```
+
+## Broker support
+
+| Feature | Redis | RabbitMQ | SurrealDB |
+|---------|-------|----------|-----------|
+| Delayed messages | Yes | Yes (requires plugin) | Yes |
+| Scheduled messages | Yes | Yes (requires plugin) | Yes |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Producers" icon="upload" href="/guides/producers">
+    Learn about all publish options
+  </Card>
+  <Card title="Brokers" icon="server" href="/brokers/redis">
+    Configure your message broker
+  </Card>
+</CardGroup>

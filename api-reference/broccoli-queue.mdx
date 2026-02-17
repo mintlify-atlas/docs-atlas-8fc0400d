@@ -1,0 +1,292 @@
+---
+title: "BroccoliQueue"
+description: "Main queue interface for message publishing and consumption"
+---
+
+`BroccoliQueue` is the primary interface for interacting with Broccoli. It provides methods for publishing, consuming, and managing messages.
+
+## Creating a queue
+
+Use the builder pattern to create a `BroccoliQueue`:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(5)
+    .failed_message_retry_strategy(Default::default())
+    .enable_scheduling(true)
+    .build()
+    .await?;
+```
+
+## Builder methods
+
+### `builder(broker_url)`
+
+Creates a new builder with the specified broker URL.
+
+```rust
+let builder = BroccoliQueue::builder("redis://localhost:6379");
+```
+
+**Parameters:**
+- `broker_url`: Connection URL for the message broker
+
+### `builder_with(db)` (SurrealDB only)
+
+Creates a builder with an existing SurrealDB connection.
+
+```rust
+let builder = BroccoliQueue::builder_with(existing_db);
+```
+
+### `.pool_connections(count)`
+
+Sets the connection pool size.
+
+```rust
+.pool_connections(10)  // Default: 10
+```
+
+**Parameters:**
+- `count`: Number of connections to maintain (u8)
+
+### `.failed_message_retry_strategy(strategy)`
+
+Configures retry behavior for failed messages.
+
+```rust
+.failed_message_retry_strategy(RetryStrategy::new().with_attempts(5))
+```
+
+**Parameters:**
+- `strategy`: A `RetryStrategy` instance
+
+### `.enable_scheduling(enabled)`
+
+Enables or disables message scheduling.
+
+```rust
+.enable_scheduling(true)  // Default: false
+```
+
+**Parameters:**
+- `enabled`: Whether scheduling is enabled (bool)
+
+### `.build()`
+
+Builds the queue instance.
+
+```rust
+let queue = builder.build().await?;
+```
+
+**Returns:** `Result<BroccoliQueue, BroccoliError>`
+
+## Publishing methods
+
+### `publish()`
+
+Publishes a single message to a queue.
+
+```rust
+let message = queue.publish(
+    "queue_name",           // Queue name
+    Some("disambiguator".to_string()),  // Optional disambiguator
+    &payload,               // Message payload
+    Some(options),          // Optional PublishOptions
+).await?;
+```
+
+**Returns:** `Result<BrokerMessage<T>, BroccoliError>`
+
+### `publish_batch()`
+
+Publishes multiple messages to a queue.
+
+```rust
+let messages = queue.publish_batch(
+    "queue_name",
+    None,
+    vec![payload1, payload2, payload3],
+    None,
+).await?;
+```
+
+**Returns:** `Result<Vec<BrokerMessage<T>>, BroccoliError>`
+
+## Consumption methods
+
+### `consume()`
+
+Consumes a single message, blocking until one is available.
+
+```rust
+let message: BrokerMessage<JobPayload> = queue.consume("queue_name", None).await?;
+```
+
+**Returns:** `Result<BrokerMessage<T>, BroccoliError>`
+
+### `try_consume()`
+
+Attempts to consume a message without blocking.
+
+```rust
+if let Some(message) = queue.try_consume::<JobPayload>("queue_name", None).await? {
+    // Process message
+}
+```
+
+**Returns:** `Result<Option<BrokerMessage<T>>, BroccoliError>`
+
+### `consume_batch()`
+
+Consumes multiple messages with a timeout.
+
+```rust
+use time::Duration;
+
+let messages = queue.consume_batch::<JobPayload>(
+    "queue_name",
+    10,                      // Batch size
+    Duration::seconds(5),    // Timeout
+    None,
+).await?;
+```
+
+**Returns:** `Result<Vec<BrokerMessage<T>>, BroccoliError>`
+
+### `try_consume_batch()`
+
+Attempts to consume multiple messages without blocking.
+
+```rust
+let messages = queue.try_consume_batch::<JobPayload>("queue_name", 10, None).await?;
+```
+
+**Returns:** `Result<Vec<BrokerMessage<T>>, BroccoliError>`
+
+### `process_messages()`
+
+Continuously processes messages with a handler function.
+
+```rust
+queue.process_messages(
+    "queue_name",
+    Some(4),          // Concurrency
+    None,             // ConsumeOptions
+    |message: BrokerMessage<JobPayload>| async move {
+        // Process message
+        Ok(())
+    },
+).await?;
+```
+
+**Parameters:**
+- `topic`: Queue name
+- `concurrency`: Optional number of concurrent workers
+- `consume_options`: Optional `ConsumeOptions`
+- `handler`: Async function returning `Result<(), BroccoliError>`
+
+### `process_messages_with_handlers()`
+
+Processes messages with separate success and error handlers.
+
+```rust
+queue.process_messages_with_handlers(
+    "queue_name",
+    Some(4),
+    None,
+    |msg| async move { /* process */ Ok(result) },
+    |msg, result| async move { /* on success */ Ok(()) },
+    |msg, error| async move { /* on error */ Ok(()) },
+).await?;
+```
+
+## Acknowledgment methods
+
+### `acknowledge()`
+
+Acknowledges successful message processing.
+
+```rust
+queue.acknowledge("queue_name", message).await?;
+```
+
+### `reject()`
+
+Rejects a message, triggering retry or failure handling.
+
+```rust
+queue.reject("queue_name", message).await?;
+```
+
+### `cancel()`
+
+Cancels a message by ID.
+
+```rust
+queue.cancel("queue_name", task_id).await?;
+```
+
+## Management methods
+
+### `size()`
+
+Returns queue sizes.
+
+```rust
+let sizes = queue.size("queue_name").await?;
+for (name, count) in sizes {
+    println!("{}: {} messages", name, count);
+}
+```
+
+**Returns:** `Result<HashMap<String, u64>, BroccoliError>`
+
+### `queue_status()` (management feature)
+
+Returns detailed queue status.
+
+```rust
+let status = queue.queue_status("queue_name".to_string(), None).await?;
+```
+
+**Requires:** `management` feature flag
+
+## Example
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, RetryStrategy, PublishOptions};
+use broccoli_queue::brokers::broker::BrokerMessage;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Job {
+    id: String,
+    data: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(5)
+        .failed_message_retry_strategy(RetryStrategy::new().with_attempts(3))
+        .build()
+        .await?;
+
+    // Publish
+    let job = Job { id: "1".to_string(), data: "test".to_string() };
+    let msg = queue.publish("jobs", None, &job, None).await?;
+    println!("Published: {}", msg.task_id);
+
+    // Consume
+    queue.process_messages("jobs", Some(2), None, |msg: BrokerMessage<Job>| async move {
+        println!("Processing: {}", msg.payload.id);
+        Ok(())
+    }).await?;
+
+    Ok(())
+}
+```

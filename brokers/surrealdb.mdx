@@ -1,0 +1,226 @@
+---
+title: "SurrealDB"
+description: "Configure Broccoli with SurrealDB as the message broker"
+---
+
+SurrealDB is a multi-model database that can serve as a message broker for Broccoli. It's useful when you want to minimize infrastructure or already use SurrealDB in your stack.
+
+## Installation
+
+Enable SurrealDB support in your `Cargo.toml`:
+
+```toml
+[dependencies]
+broccoli_queue = { version = "0.4", default-features = false, features = ["surrealdb"] }
+```
+
+## Connection
+
+Connect to SurrealDB using a WebSocket URL:
+
+```rust
+let queue = BroccoliQueue::builder("ws://localhost:8000")
+    .build()
+    .await?;
+```
+
+### Connection URL format
+
+```
+ws://[host][:port]
+wss://[host][:port]  # TLS
+```
+
+Examples:
+
+```rust
+// Local SurrealDB
+let queue = BroccoliQueue::builder("ws://localhost:8000").build().await?;
+
+// With TLS
+let queue = BroccoliQueue::builder("wss://surrealdb.example.com:8000").build().await?;
+```
+
+## Reusing existing connections
+
+If you already have a SurrealDB connection in your application, you can reuse it:
+
+```rust
+use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
+
+// Your existing SurrealDB connection
+let db: Surreal<Any> = /* ... */;
+
+let queue = BroccoliQueue::builder_with(db)
+    .build()
+    .await?;
+```
+
+This avoids creating duplicate connections and shares the existing connection pool.
+
+## Configuration
+
+### Complete example
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, RetryStrategy};
+
+let queue = BroccoliQueue::builder("ws://localhost:8000")
+    .pool_connections(5)
+    .failed_message_retry_strategy(
+        RetryStrategy::new()
+            .with_attempts(5)
+            .retry_failed(true)
+    )
+    .enable_scheduling(true)
+    .build()
+    .await?;
+```
+
+## Data model
+
+Broccoli uses SurrealDB tables to store queue data:
+
+| Table | Purpose |
+|-------|---------|
+| `{queue_name}_pending` | Messages waiting to be processed |
+| `{queue_name}_processing` | Messages currently being processed |
+| `{queue_name}_failed` | Messages that exceeded retry attempts |
+| `{queue_name}_scheduled` | Messages scheduled for future delivery |
+
+## Running SurrealDB
+
+### Docker
+
+```bash
+docker run -d --name surrealdb \
+  -p 8000:8000 \
+  surrealdb/surrealdb:latest \
+  start --user root --pass root
+```
+
+### Docker with persistence
+
+```bash
+docker run -d --name surrealdb \
+  -p 8000:8000 \
+  -v surrealdb-data:/data \
+  surrealdb/surrealdb:latest \
+  start --user root --pass root file:/data/database.db
+```
+
+### Docker Compose
+
+```yaml
+version: '3.8'
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - surrealdb-data:/data
+    command: start --user root --pass root file:/data/database.db
+
+volumes:
+  surrealdb-data:
+```
+
+### Local installation
+
+```bash
+# macOS
+brew install surrealdb/tap/surreal
+
+# Linux
+curl -sSf https://install.surrealdb.com | sh
+
+# Start the server
+surreal start --user root --pass root memory
+```
+
+## Concurrency considerations
+
+SurrealDB operations may encounter concurrency issues when multiple workers try to consume the same message. Broccoli handles this automatically with the `BrokerNonIdempotentOp` error type.
+
+If you see these errors in logs, they're expected behavior:
+
+```
+Failed to consume message due to concurrency issues: ...
+```
+
+The worker will retry and pick up the next available message.
+
+## In-memory mode
+
+For testing, you can use SurrealDB's in-memory mode:
+
+```rust
+// In-memory for testing
+let queue = BroccoliQueue::builder("mem://")
+    .build()
+    .await?;
+```
+
+<Warning>
+In-memory mode loses all data when the application stops. Use only for testing.
+</Warning>
+
+## Best practices
+
+<Columns cols={2}>
+  <Card title="Use file persistence" icon="hard-drive">
+    Enable file-based storage for production to survive restarts.
+  </Card>
+  <Card title="Monitor table sizes" icon="table">
+    Query table counts to monitor queue depths.
+  </Card>
+  <Card title="Reuse connections" icon="link">
+    Share your existing SurrealDB connection to reduce overhead.
+  </Card>
+  <Card title="Handle concurrency" icon="users">
+    Expect and handle `BrokerNonIdempotentOp` errors in high-concurrency scenarios.
+  </Card>
+</Columns>
+
+## Troubleshooting
+
+### Connection failed
+
+```
+Error: Broker error: Failed to connect to broker
+```
+
+Ensure SurrealDB is running:
+
+```bash
+docker ps | grep surrealdb
+```
+
+### Non-idempotent operation errors
+
+```
+Error: Broker error: non-idempotent operation
+```
+
+This is expected under high concurrency. The message will be retried automatically.
+
+### Retriable operation errors
+
+```
+Error: Broker error: non-idempotent retriable operation
+```
+
+This indicates a transient conflict that will be retried automatically.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Redis" icon="database" href="/brokers/redis">
+    Use Redis for higher throughput
+  </Card>
+  <Card title="RabbitMQ" icon="rabbit" href="/brokers/rabbitmq">
+    Use RabbitMQ for advanced routing
+  </Card>
+</CardGroup>

@@ -1,0 +1,260 @@
+---
+title: "Consumers"
+description: "Process messages from queues with Broccoli"
+---
+
+Consumers retrieve and process messages from queues. Broccoli provides multiple consumption patterns for different use cases.
+
+## Basic message processing
+
+The simplest way to process messages is with `process_messages`:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use broccoli_queue::brokers::broker::BrokerMessage;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(5)
+        .failed_message_retry_strategy(Default::default())
+        .build()
+        .await?;
+
+    // Process messages continuously
+    queue.process_messages(
+        "jobs",
+        Some(4),  // 4 concurrent workers
+        None,
+        |message: BrokerMessage<JobPayload>| async move {
+            println!("Processing: {}", message.payload.id);
+            // Your processing logic here
+            Ok(())
+        },
+    ).await?;
+
+    Ok(())
+}
+```
+
+## Concurrency
+
+Control the number of concurrent workers processing messages:
+
+```rust
+// Single worker (sequential processing)
+queue.process_messages("jobs", None, None, handler).await?;
+
+// 4 concurrent workers
+queue.process_messages("jobs", Some(4), None, handler).await?;
+
+// 10 concurrent workers for high throughput
+queue.process_messages("jobs", Some(10), None, handler).await?;
+```
+
+## Custom handlers
+
+Use `process_messages_with_handlers` for separate success and error handling:
+
+```rust
+use broccoli_queue::error::BroccoliError;
+
+async fn process_job(message: BrokerMessage<JobPayload>) -> Result<String, BroccoliError> {
+    println!("Processing: {}", message.payload.id);
+    // Return a result that gets passed to the success handler
+    Ok(format!("Completed {}", message.payload.id))
+}
+
+async fn on_success(message: BrokerMessage<JobPayload>, result: String) -> Result<(), BroccoliError> {
+    println!("Success: {} - {}", message.task_id, result);
+    Ok(())
+}
+
+async fn on_error(message: BrokerMessage<JobPayload>, error: BroccoliError) -> Result<(), BroccoliError> {
+    eprintln!("Failed {}: {:?}", message.task_id, error);
+    // Log to error tracking service, send alert, etc.
+    Ok(())
+}
+
+queue.process_messages_with_handlers(
+    "jobs",
+    Some(3),
+    None,
+    process_job,
+    on_success,
+    on_error,
+).await?;
+```
+
+## Consume options
+
+Customize consumer behavior with `ConsumeOptions`:
+
+```rust
+use broccoli_queue::queue::ConsumeOptions;
+use std::time::Duration;
+
+let options = ConsumeOptions::builder()
+    .auto_ack(false)                        // Manual acknowledgment (default)
+    .fairness(true)                         // Enable fair processing (Redis only)
+    .consume_wait(Duration::from_millis(10)) // Wait between iterations
+    .handler_ack(true)                      // Auto-acknowledge after handler (default)
+    .build();
+
+queue.process_messages("jobs", Some(4), Some(options), handler).await?;
+```
+
+### Auto-acknowledgment
+
+By default, messages require explicit acknowledgment. Enable auto-ack to automatically acknowledge on consume:
+
+```rust
+let options = ConsumeOptions::builder()
+    .auto_ack(true)
+    .build();
+```
+
+<Warning>
+With auto-acknowledgment, messages are removed from the queue immediately upon consumption. If processing fails, the message is lost.
+</Warning>
+
+### Fair processing
+
+Enable fairness to ensure messages from different disambiguators are processed evenly (Redis only):
+
+```rust
+let options = ConsumeOptions::builder()
+    .fairness(true)
+    .build();
+```
+
+### Disabling handler acknowledgment
+
+Disable automatic acknowledgment after successful handler execution:
+
+```rust
+let options = ConsumeOptions::builder()
+    .handler_ack(false)
+    .build();
+```
+
+This is useful when you want to delegate acknowledgment to another process or handle it manually.
+
+## Manual consumption
+
+For more control, consume messages manually:
+
+### Blocking consume
+
+```rust
+// Blocks until a message is available
+let message: BrokerMessage<JobPayload> = queue.consume("jobs", None).await?;
+
+// Process the message
+process_job(&message).await?;
+
+// Acknowledge or reject
+queue.acknowledge("jobs", message).await?;
+```
+
+### Non-blocking consume
+
+```rust
+// Returns immediately with None if no message available
+if let Some(message) = queue.try_consume::<JobPayload>("jobs", None).await? {
+    process_job(&message).await?;
+    queue.acknowledge("jobs", message).await?;
+}
+```
+
+### Batch consumption
+
+Consume multiple messages at once:
+
+```rust
+use time::Duration;
+
+// Consume up to 10 messages, waiting up to 5 seconds
+let messages = queue.consume_batch::<JobPayload>(
+    "jobs",
+    10,
+    Duration::seconds(5),
+    None,
+).await?;
+
+for message in messages {
+    process_job(&message).await?;
+    queue.acknowledge("jobs", message).await?;
+}
+```
+
+### Non-blocking batch consumption
+
+```rust
+// Try to consume up to 10 messages without blocking
+let messages = queue.try_consume_batch::<JobPayload>("jobs", 10, None).await?;
+```
+
+## Message acknowledgment
+
+### Acknowledge (success)
+
+Remove a message from the processing queue after successful processing:
+
+```rust
+queue.acknowledge("jobs", message).await?;
+```
+
+### Reject (failure)
+
+Move a message to the retry queue or failed queue:
+
+```rust
+queue.reject("jobs", message).await?;
+```
+
+Rejected messages are retried according to the configured retry strategy. After exhausting retries, they move to the failed queue.
+
+## Accessing message metadata
+
+The `BrokerMessage` struct provides useful metadata:
+
+```rust
+|message: BrokerMessage<JobPayload>| async move {
+    println!("Task ID: {}", message.task_id);
+    println!("Attempts: {}", message.attempts);
+    println!("Disambiguator: {:?}", message.disambiguator);
+    println!("Payload: {:?}", message.payload);
+    
+    Ok(())
+}
+```
+
+## Queue size
+
+Check the number of pending messages:
+
+```rust
+let sizes = queue.size("jobs").await?;
+for (queue_name, size) in sizes {
+    println!("{}: {} messages", queue_name, size);
+}
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Retry strategies" icon="rotate" href="/guides/retry-strategies">
+    Configure retry behavior for failed messages
+  </Card>
+  <Card title="Producers" icon="upload" href="/guides/producers">
+    Learn about publishing messages
+  </Card>
+</CardGroup>

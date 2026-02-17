@@ -1,0 +1,211 @@
+---
+title: "RetryStrategy"
+description: "Configure retry behavior for failed messages"
+---
+
+`RetryStrategy` configures how Broccoli handles messages that fail processing, including whether to retry and how many attempts to make.
+
+## Definition
+
+```rust
+pub struct RetryStrategy {
+    pub retry_failed: bool,
+    pub attempts: Option<u8>,
+}
+```
+
+## Creating a strategy
+
+### Default strategy
+
+The default strategy retries failed messages up to 3 times:
+
+```rust
+use broccoli_queue::queue::RetryStrategy;
+
+let strategy = RetryStrategy::default();
+// retry_failed: true
+// attempts: Some(3)
+```
+
+### Using the builder pattern
+
+```rust
+let strategy = RetryStrategy::new()
+    .with_attempts(5)
+    .retry_failed(true);
+```
+
+## Methods
+
+### `new()`
+
+Creates a new `RetryStrategy` with default settings (3 attempts, retry enabled).
+
+```rust
+let strategy = RetryStrategy::new();
+```
+
+**Returns:** `RetryStrategy`
+
+### `.with_attempts(count)`
+
+Sets the maximum number of retry attempts.
+
+```rust
+let strategy = RetryStrategy::new()
+    .with_attempts(10);
+```
+
+**Parameters:**
+- `count`: `u8` - Maximum retry attempts
+
+**Returns:** `RetryStrategy`
+
+### `.retry_failed(enabled)`
+
+Enables or disables message retrying.
+
+```rust
+let strategy = RetryStrategy::new()
+    .retry_failed(false);  // Disable retries
+```
+
+**Parameters:**
+- `enabled`: `bool` - Whether to retry failed messages
+
+**Returns:** `RetryStrategy`
+
+## Fields
+
+### `retry_failed`
+
+Whether failed messages should be retried.
+
+**Type:** `bool`
+
+**Default:** `true`
+
+When `false`, failed messages are immediately moved to the failed queue without any retry attempts.
+
+### `attempts`
+
+Maximum number of retry attempts before moving to the failed queue.
+
+**Type:** `Option<u8>`
+
+**Default:** `Some(3)`
+
+Set to `None` to use the default of 3 attempts.
+
+## Using with BroccoliQueue
+
+Apply a retry strategy when building the queue:
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, RetryStrategy};
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(
+        RetryStrategy::new()
+            .with_attempts(5)
+            .retry_failed(true)
+    )
+    .build()
+    .await?;
+```
+
+## Examples
+
+### Default retry (3 attempts)
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(Default::default())
+    .build()
+    .await?;
+```
+
+### More retries for transient failures
+
+```rust
+let strategy = RetryStrategy::new()
+    .with_attempts(10);
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(strategy)
+    .build()
+    .await?;
+```
+
+### No retries (fail fast)
+
+```rust
+let strategy = RetryStrategy::new()
+    .retry_failed(false);
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(strategy)
+    .build()
+    .await?;
+```
+
+### Single retry
+
+```rust
+let strategy = RetryStrategy::new()
+    .with_attempts(1);
+```
+
+## Retry behavior
+
+When a message handler returns an error:
+
+<Steps>
+  <Step title="Check retry policy">
+    If `retry_failed` is `false`, skip to step 4.
+  </Step>
+  <Step title="Increment attempt counter">
+    The message's `attempts` field is incremented.
+  </Step>
+  <Step title="Check attempt limit">
+    If `attempts < max_attempts`, requeue the message for retry.
+  </Step>
+  <Step title="Move to failed queue">
+    If retries are exhausted or disabled, move the message to the failed queue.
+  </Step>
+</Steps>
+
+## Accessing attempt count
+
+Check the current attempt in your handler:
+
+```rust
+queue.process_messages("jobs", Some(4), None, |msg| async move {
+    println!("Attempt {} of processing", msg.attempts);
+    
+    if msg.attempts > 2 {
+        // Log additional context on later retries
+        log::warn!("Multiple retries for task {}", msg.task_id);
+    }
+    
+    process_job(&msg.payload).await
+}).await?;
+```
+
+## Best practices
+
+<Columns cols={2}>
+  <Card title="Set appropriate limits" icon="sliders">
+    Choose retry counts based on the nature of expected failures.
+  </Card>
+  <Card title="Make handlers idempotent" icon="repeat">
+    Ensure handlers can safely process the same message multiple times.
+  </Card>
+  <Card title="Monitor failed queues" icon="chart-line">
+    Set up alerts for messages that exhaust all retries.
+  </Card>
+  <Card title="Log retry attempts" icon="file-lines">
+    Include attempt count in logs for debugging.
+  </Card>
+</Columns>

@@ -1,80 +1,182 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Create your first Broccoli producer and consumer"
 ---
 
-## Get started in three steps
+This guide walks you through creating a basic job queue with a producer that publishes jobs and a consumer that processes them.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+- Broccoli installed (see [Installation](/installation))
+- Redis running locally (or another supported broker)
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+## Define your job payload
+
+First, create a struct that represents your job data. This struct must implement `Serialize` and `Deserialize`:
+
+```rust
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+}
+```
+
+## Create a producer
+
+The producer publishes jobs to the queue:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize the queue
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(5)
+        .failed_message_retry_strategy(Default::default())
+        .build()
+        .await?;
+
+    // Create jobs
+    let jobs = vec![
+        JobPayload {
+            id: "job-1".to_string(),
+            task_name: "process_data".to_string(),
+        },
+        JobPayload {
+            id: "job-2".to_string(),
+            task_name: "generate_report".to_string(),
+        },
+    ];
+
+    // Publish jobs in batch
+    queue.publish_batch("jobs", None, jobs, None).await?;
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    println!("Jobs published successfully!");
+    Ok(())
+}
+```
 
-### Step 2: Deploy your changes
+## Create a consumer
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+The consumer processes jobs from the queue:
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use broccoli_queue::brokers::broker::BrokerMessage;
+use serde::{Serialize, Deserialize};
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+}
 
-### Step 3: Go live
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize the queue
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(5)
+        .failed_message_retry_strategy(Default::default())
+        .build()
+        .await?;
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    // Process messages with 2 concurrent workers
+    queue.process_messages(
+        "jobs",
+        Some(2),
+        None,
+        |message: BrokerMessage<JobPayload>| async move {
+            println!("Processing job: {} - {}", message.payload.id, message.payload.task_name);
+            
+            // Your job processing logic here
+            
+            Ok(())
+        },
+    ).await?;
+
+    Ok(())
+}
+```
+
+## Run the example
+
+<Steps>
+  <Step title="Start Redis">
+    ```bash
+    docker run -d -p 6379:6379 redis
+    ```
+  </Step>
+  <Step title="Run the consumer">
+    In one terminal, start the consumer:
+    ```bash
+    cargo run --bin consumer
+    ```
+  </Step>
+  <Step title="Run the producer">
+    In another terminal, publish jobs:
+    ```bash
+    cargo run --bin producer
+    ```
+  </Step>
+</Steps>
+
+You should see the consumer processing the jobs as they arrive.
+
+## Using custom handlers
+
+For more control over success and error handling, use `process_messages_with_handlers`:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use broccoli_queue::brokers::broker::BrokerMessage;
+use broccoli_queue::error::BroccoliError;
+
+queue.process_messages_with_handlers(
+    "jobs",
+    Some(3),
+    None,
+    // Message handler
+    |message: BrokerMessage<JobPayload>| async move {
+        println!("Processing: {}", message.payload.id);
+        Ok(())
+    },
+    // Success handler
+    |message, _result| async move {
+        println!("Completed: {}", message.payload.id);
+        Ok(())
+    },
+    // Error handler
+    |message, error| async move {
+        eprintln!("Failed {}: {:?}", message.payload.id, error);
+        Ok(())
+    },
+).await?;
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Producers" icon="upload" href="/guides/producers">
+    Learn about publishing options and batch operations
+  </Card>
+  <Card title="Consumers" icon="download" href="/guides/consumers">
+    Configure consumer behavior and concurrency
+  </Card>
+  <Card title="Retry strategies" icon="rotate" href="/guides/retry-strategies">
+    Handle failed messages with retries
+  </Card>
+  <Card title="Message scheduling" icon="clock" href="/guides/message-scheduling">
+    Delay and schedule messages
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
